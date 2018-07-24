@@ -26,12 +26,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--examples', dest='example_path')
     parser.add_argument('--labels', dest='labels_path')
+    parser.add_argument('--dest', dest='dest_path')
+
     args = parser.parse_args()
     example_path = args.example_path
     labels_path = args.labels_path
+    dest_path = args.dest_path
     examples, labels = get(data_path=example_path, label_path=labels_path)
     dataset = {'examples': examples, 'labels': labels}
-    with open('../1_100.pkl', 'wb') as pkl:
+    with open(dest_path, 'wb') as pkl:
         pickle.dump(dataset, pkl, protocol=pickle.HIGHEST_PROTOCOL)
     print(examples.shape, labels.shape)
 
