@@ -1,9 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="ChangeListManager">
-    <list default="true" id="8960e5bc-7efb-4327-9825-3a229f91681e" name="Default" comment="">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" afterPath="$PROJECT_DIR$/.idea/workspace.xml" />
-    </list>
+    <list default="true" id="8960e5bc-7efb-4327-9825-3a229f91681e" name="Default" comment="" />
     <option name="EXCLUDED_CONVERTED_TO_IGNORED" value="true" />
     <option name="TRACKING_ENABLED" value="true" />
     <option name="SHOW_DIALOG" value="false" />
@@ -50,8 +48,8 @@
       <file leaf-file-name="hocr.py" pinned="false" current-in-tab="true">
         <entry file="file://$PROJECT_DIR$/hocr.py">
           <provider selected="true" editor-type-id="text-editor">
-            <state relative-caret-position="447">
-              <caret line="39" column="29" lean-forward="true" selection-start-line="39" selection-start-column="29" selection-end-line="39" selection-end-column="29" />
+            <state relative-caret-position="216">
+              <caret line="42" column="28" lean-forward="true" selection-start-line="42" selection-start-column="28" selection-end-line="42" selection-end-column="28" />
               <folding>
                 <element signature="e#2#39#0" expanded="true" />
               </folding>
@@ -76,6 +74,7 @@
       <find>we have</find>
       <find>1024</find>
       <find>512</find>
+      <find>flip</find>
     </findStrings>
   </component>
   <component name="Git.Settings">
@@ -643,8 +642,8 @@
     </entry>
     <entry file="file://$PROJECT_DIR$/hocr.py">
       <provider selected="true" editor-type-id="text-editor">
-        <state relative-caret-position="447">
-          <caret line="39" column="29" lean-forward="true" selection-start-line="39" selection-start-column="29" selection-end-line="39" selection-end-column="29" />
+        <state relative-caret-position="216">
+          <caret line="42" column="28" lean-forward="true" selection-start-line="42" selection-start-column="28" selection-end-line="42" selection-end-column="28" />
           <folding>
             <element signature="e#2#39#0" expanded="true" />
           </folding>
