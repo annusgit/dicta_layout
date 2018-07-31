@@ -6,16 +6,16 @@
 
 from __future__ import print_function
 from __future__ import division
-import torch
-import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-import torch.nn.functional as F
-from torch.optim import Adam
 import os
-# from sklearn.preprocessing import scale
+import torch
 import numpy as np
+import torch.nn as nn
+from torch.optim import Adam
 from dataset import get_data
-import cv2
+from get_dataloaders import get_dataloaders
+import torch.nn.functional as F
+# from torchsummary import summary
+
 
 class UNet_down_block(nn.Module):
     """
@@ -265,7 +265,393 @@ class Bigger_Unet(nn.Module):
         pass
 
 
-def train_net(model, dataset, pre_model, im_size, patch_size, lr, batch_size, log_after, cuda):
+###########################################################################################
+
+class d2_conv_block(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(d2_conv_block, self).__init__()
+        self.conv2d_1 = nn.Conv2d(in_channels=in_channels, out_channels=out_channels,
+                                  kernel_size=1, padding=0)
+        self.conv2d_3 = nn.Conv2d(in_channels=in_channels, out_channels=out_channels,
+                                  kernel_size=3, padding=1)
+        self.conv2d_5 = nn.Conv2d(in_channels=in_channels, out_channels=out_channels,
+                                  kernel_size=5, padding=2)
+        self.conv2d_7 = nn.Conv2d(in_channels=in_channels, out_channels=out_channels,
+                                  kernel_size=7, padding=3)
+
+    def forward(self, x):
+        x1 = self.conv2d_1(x)
+        x3 = self.conv2d_3(x)
+        x5 = self.conv2d_5(x)
+        x7 = self.conv2d_7(x)
+        return x1, x3, x5, x7
+
+
+class d1_conv_block(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(d1_conv_block, self).__init__()
+        self.conv1d_1 = nn.Conv1d(in_channels=in_channels, out_channels=out_channels,
+                                  kernel_size=1, padding=0)
+        self.conv1d_3 = nn.Conv1d(in_channels=in_channels, out_channels=out_channels,
+                                  kernel_size=3, padding=1)
+        self.conv1d_5 = nn.Conv1d(in_channels=in_channels, out_channels=out_channels,
+                                  kernel_size=5, padding=2)
+        self.conv1d_7 = nn.Conv1d(in_channels=in_channels, out_channels=out_channels,
+                                  kernel_size=7, padding=3)
+
+    def forward(self, x):
+        x1 = self.conv1d_1(x)
+        x3 = self.conv1d_3(x)
+        x5 = self.conv1d_5(x)
+        x7 = self.conv1d_7(x)
+        return x1, x3, x5, x7
+
+
+class d1_model(nn.Module):
+
+    def __init__(self, spatial_size):
+        super(d1_model, self).__init__()
+        self.input_size = spatial_size
+        self.out_classes = 5
+        self.conv2d_block = d2_conv_block(in_channels=3, out_channels=3)
+        self.bn_1 = nn.BatchNorm2d(3)
+        self.conv1d_block1 = d1_conv_block(in_channels=3, out_channels=1)
+        self.bn_2 = nn.BatchNorm2d(1)
+        self.conv1d_block2 = d1_conv_block(in_channels=1, out_channels=1)
+        self.bn_3 = nn.BatchNorm2d(1)
+        self.conv1d_block3 = d1_conv_block(in_channels=1, out_channels=1)
+        self.bn_4 = nn.BatchNorm2d(1)
+        self.maxpool = nn.MaxPool1d(kernel_size=2)
+        self.fc = nn.Linear(in_features=self.input_size**2/2, out_features=5)
+        self.softmax = nn.Softmax(dim=1)
+        # self.dropout2d = nn.Dropout2d(0.5)
+        # self.dropout1d1 = nn.Dropout(0.5)
+        # self.dropout1d2 = nn.Dropout(0.5)
+        # count parameters
+        self.num_trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        pass
+
+    def forward(self, x):
+        batch_size = x.size(0)
+        # normalize input anyway...
+        # x = (x - torch.mean(x)) / torch.std(x)
+
+        # 2d parallel convs
+        x1, x3, x5, x7 = self.conv2d_block(x)
+        # add 2d conv feature maps
+        out1 = x1 + x3 + x5 + x7
+        out1 = self.bn_1(out1).view(batch_size, 3, -1)
+
+        # 1d parallel convs
+        # print(out1.size())
+        x1, x3, x5, x7 = self.conv1d_block1(out1)
+        # print(x1.size(), x3.size(), x5.size(), x7.size())
+        # add 1d conv feature maps
+        out2 = (x1 + x3 + x5 + x7).view(batch_size, 1, self.input_size, self.input_size)
+        out2 = self.bn_2(out2).view(batch_size, 1, -1)
+        # out2 = self.dropout1d1(out2)
+
+        # 1d parallel convs
+        x1, x3, x5, x7 = self.conv1d_block2(out2)
+        # add 1d conv feature maps
+        out3 = x1 + x3 + x5 + x7
+        # add previous connections
+        out3 = (out2 + out3).view(batch_size, 1, self.input_size, self.input_size)
+        out3 = self.bn_3(out3).view(batch_size, 1, -1)
+        # out3 = self.dropout1d2(out3)
+
+        # 1d parallel convs
+        x1, x3, x5, x7 = self.conv1d_block3(out3)
+        # add 1d conv feature maps
+        out4 = x1 + x3 + x5 + x7
+        # add previous connections
+        out4 = out2 + out3 + out4
+        out4 = self.maxpool(out4).view(batch_size,-1)
+        # print(out1.size(), out2.size(), out3.size(), out4.size())
+        out = self.softmax(self.fc(out4))
+        return out, torch.argmax(out, dim=1)
+###############################################################################3
+
+
+class d1_model_with_dropout(nn.Module):
+
+    def __init__(self, spatial_size):
+        super(d1_model_with_dropout, self).__init__()
+        self.input_size = spatial_size
+        self.out_classes = 5
+
+        self.input_bn = nn.BatchNorm2d(3)
+        self.conv2d_block = d2_conv_block(in_channels=3, out_channels=3)
+        self.bn_1 = nn.BatchNorm2d(3)
+        self.maxpool2d = nn.MaxPool2d(kernel_size=2)
+
+        self.conv1d_block1 = d1_conv_block(in_channels=3, out_channels=1)
+        self.bn_2 = nn.BatchNorm2d(1)
+
+        self.conv1d_block2 = d1_conv_block(in_channels=1, out_channels=1)
+        self.bn_3 = nn.BatchNorm2d(1)
+
+        self.conv1d_block3 = d1_conv_block(in_channels=1, out_channels=1)
+        self.bn_4 = nn.BatchNorm2d(1)
+
+        self.conv1d_block4 = d1_conv_block(in_channels=1, out_channels=1)
+        self.bn_5 = nn.BatchNorm2d(1)
+
+        self.conv1d_block5 = d1_conv_block(in_channels=1, out_channels=1)
+        self.bn_6 = nn.BatchNorm2d(1)
+
+        self.conv1d_block6 = d1_conv_block(in_channels=1, out_channels=1)
+        self.bn_7 = nn.BatchNorm2d(1)
+
+        self.conv1d_block7 = d1_conv_block(in_channels=1, out_channels=1)
+        self.bn_8 = nn.BatchNorm2d(1)
+
+        self.conv1d_block8 = d1_conv_block(in_channels=1, out_channels=1)
+        self.bn_9 = nn.BatchNorm2d(1)
+
+        self.conv1d_block9 = d1_conv_block(in_channels=1, out_channels=1)
+        self.bn_10 = nn.BatchNorm2d(1)
+
+        self.conv1d_block10 = d1_conv_block(in_channels=1, out_channels=1)
+        self.bn_11 = nn.BatchNorm2d(1)
+
+        self.maxpool1d = nn.MaxPool1d(kernel_size=2)
+        self.fc_1 = nn.Linear(in_features=8, out_features=8)
+        self.fc_2 = nn.Linear(in_features=8, out_features=8)
+        self.fc_3 = nn.Linear(in_features=8, out_features=self.out_classes)
+        self.relu = nn.ReLU()
+
+        self.softmax = nn.Softmax(dim=1)
+        self.dropout_2d = nn.Dropout2d(0.5)
+        self.dropout_1d = nn.Dropout(0.2)
+        self.dropout_fc = nn.Dropout(0.2)
+
+        # count parameters
+        self.num_trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(self.num_trainable_params)
+
+        pass
+
+    def d1_unit(self, x_in, conv_block, bn_block):
+        # 1d parallel convs
+        x1, x3, x5, x7 = conv_block(x_in)
+        # add 1d conv feature maps
+        out = (x1 + x3 + x5 + x7)
+        # add prev maps
+        out = (out + x_in).unsqueeze(1)
+        out = bn_block(out).squeeze(1)
+        out = self.maxpool1d(out)
+        return out
+
+
+    def forward(self, x):
+        batch_size = x.size(0)
+        # normalize input anyway...
+        x = self.input_bn(x)
+
+        # 2d parallel convs
+        x1, x3, x5, x7 = self.conv2d_block(x)
+        # add 2d conv feature maps
+        out1 = x1 + x3 + x5 + x7
+        out1 = self.bn_1(out1)
+        out1 = self.maxpool2d(out1)
+        out1 = self.dropout_2d(out1).view(batch_size, 3, -1) # reshape for 1d ops
+
+        # 1d parallel convs
+        x1, x3, x5, x7 = self.conv1d_block1(out1)
+        # add 1d conv feature maps
+        out2 = (x1 + x3 + x5 + x7).unsqueeze(1)
+        out2 = self.bn_2(out2).squeeze(1)
+        out2 = self.maxpool1d(out2)
+
+        out3 = self.d1_unit(x_in=out2, conv_block=self.conv1d_block2, bn_block=self.bn_3)
+        out4 = self.d1_unit(x_in=out3, conv_block=self.conv1d_block3, bn_block=self.bn_4)
+        out5 = self.d1_unit(x_in=out4, conv_block=self.conv1d_block4, bn_block=self.bn_5)
+        out5 = self.dropout_1d(out5)
+        out6 = self.d1_unit(x_in=out5, conv_block=self.conv1d_block5, bn_block=self.bn_6)
+        out7 = self.d1_unit(x_in=out6, conv_block=self.conv1d_block6, bn_block=self.bn_7)
+        out8 = self.d1_unit(x_in=out7, conv_block=self.conv1d_block7, bn_block=self.bn_8)
+        out9 = self.d1_unit(x_in=out8, conv_block=self.conv1d_block8, bn_block=self.bn_9)
+        out10 = self.d1_unit(x_in=out9, conv_block=self.conv1d_block9, bn_block=self.bn_10)
+        out10 = out10.squeeze(dim=1)
+
+        out = self.relu(self.fc_1(out10))
+        out = self.dropout_fc(out)
+        out = self.relu(self.fc_2(out))
+        out = self.softmax(self.fc_3(out))
+        return out, torch.argmax(out, dim=1)
+###############################################################################3
+
+
+class d1_model_(nn.Module):
+
+    def __init__(self, spatial_size):
+        super(d1_model_, self).__init__()
+        self.input_size, self.out_classes = spatial_size, 5
+        self.conv2d_1 = nn.Conv2d(in_channels=3, out_channels=1, kernel_size=3, padding=1)
+        self.conv2d_2 = nn.Conv2d(in_channels=3, out_channels=1, kernel_size=5, padding=2)
+        self.conv2d_3 = nn.Conv2d(in_channels=3, out_channels=1, kernel_size=7, padding=3)
+        self.maxpool2d = nn.MaxPool2d(kernel_size=2)
+        self.conv1d_1 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=3, padding=1)
+        self.conv1d_2 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=3, padding=1)
+        self.conv1d_3 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=3, padding=1)
+        self.conv1d_4 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=3, padding=1)
+        self.conv1d_5 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=3, padding=1)
+        self.conv1d_6 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=3, padding=1)
+        self.conv1d_7 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=3, padding=1)
+        self.conv1d_8 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=3, padding=1)
+        self.conv1d_9 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=3, padding=1)
+        self.maxpool1d = nn.MaxPool1d(kernel_size=2)
+        self.fc = nn.Linear(in_features=self.input_size**2/(2**10), out_features=5)
+        self.softmax = nn.Softmax(dim=1)
+        # self.dropout2d = nn.Dropout2d(0.5)
+        # self.dropout1d1 = nn.Dropout(0.5)
+        # self.dropout1d2 = nn.Dropout(0.5)
+
+        # count parameters
+        self.num_trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        pass
+
+    def forward(self, x):
+        batch_size = x.size(0)
+        # normalize input anyway...
+        c2_1 = self.conv2d_1(x) # image_size*image_size
+        c2_2 = self.conv2d_2(x)  # image_size*image_size
+        c2_3 = self.conv2d_3(x)  # image_size*image_size
+        out1_ = c2_1 + c2_2 + c2_3
+        out1 = self.maxpool2d(out1_).view(batch_size,1,-1) # image_size/2*image_size/2
+        out2_ = self.conv1d_1(out1) + out1 # image_size/2*image_size/2
+        out2 = self.maxpool1d(out2_)
+        out3_ = self.conv1d_2(out2) + out2
+        out3 = self.maxpool1d(out3_)
+        out4_ = self.conv1d_3(out3) + out3
+        out4 = self.maxpool1d(out4_)
+        out5_ = self.conv1d_4(out4) + out4
+        out5 = self.maxpool1d(out5_)
+        out6_ = self.conv1d_5(out5) + out5
+        out6 = self.maxpool1d(out6_)
+        out7_ = self.conv1d_6(out6) + out6
+        out7 = self.maxpool1d(out7_)
+        out8_ = self.conv1d_7(out7) + out7
+        out8 = self.maxpool1d(out8_)
+        out9_ = self.conv1d_8(out8) + out8
+        out9 = self.maxpool1d(out9_)
+        out = self.softmax(self.fc(out9).squeeze())
+        # count parameters
+        # self.num_trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        # print('log: num of trainable params: ', self.num_trainable_params)
+        return out, torch.argmax(out, dim=1)
+###############################################################################3
+
+
+class d1_resnet(nn.Module):
+
+    def __init__(self, spatial_size):
+        super(d1_resnet, self).__init__()
+
+        self.input_size, self.out_classes = spatial_size, 5
+        self.conv2d_1 = nn.Conv2d(in_channels=3, out_channels=1, kernel_size=3, padding=1)
+        self.conv2d_2 = nn.Conv2d(in_channels=3, out_channels=1, kernel_size=5, padding=2)
+        self.conv2d_3 = nn.Conv2d(in_channels=3, out_channels=1, kernel_size=7, padding=3)
+
+        self.maxpool2d = nn.MaxPool2d(kernel_size=2)
+        self.relu = nn.ReLU()
+
+        self.conv1d_1 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=3, padding=1)
+        self.conv1d_2 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=3, padding=1)
+        self.conv1d_3 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=3, padding=1)
+        self.conv1d_4 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=3, padding=1)
+        self.conv1d_5 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=3, padding=1)
+        self.conv1d_6 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=3, padding=1)
+        self.conv1d_7 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=3, padding=1)
+        self.conv1d_8 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=3, padding=1)
+        self.conv1d_9 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=3, padding=1)
+        self.conv1d_10 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=3, padding=1)
+
+        self.maxpool1d = nn.MaxPool1d(kernel_size=2)
+        self.fc1 = nn.Linear(in_features=self.input_size**2/(2**7), out_features=64)
+        self.fc2 = nn.Linear(in_features=64, out_features=16)
+        self.fc3 = nn.Linear(in_features=16, out_features=5)
+        self.softmax = nn.Softmax(dim=1)
+
+        self.dropout2d = nn.Dropout2d(0.5)
+        self.dropout1d1 = nn.Dropout(0.2)
+        self.dropoutfc = nn.Dropout(0.2)
+
+        # count parameters
+        self.num_trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print('log: trainable params', self.num_trainable_params)
+        pass
+
+    def residual_module(self, x_in, conv_1, conv_2):
+        # implements a single res-block
+        # x -> weight1 -> relu -> weight2 -> F(x)
+        # F(x) + x -> relu -> output
+        return self.relu(conv_2(self.relu(conv_1(x_in))) + x_in)
+
+    def forward(self, x):
+        batch_size = x.size(0)
+        # normalize input anyway...
+        c2_1 = self.conv2d_1(x) # image_size*image_size
+        c2_2 = self.conv2d_2(x)  # image_size*image_size
+        c2_3 = self.conv2d_3(x)  # image_size*image_size
+        out1_ = self.relu(c2_1 + c2_2 + c2_3)
+        out1 = self.maxpool2d(out1_).view(batch_size,1,-1) # image_size/2*image_size/2
+        out1 = self.dropout2d(out1)
+
+        # out2 = self.relu(self.conv1d_1(out1)) # + out1 # image_size/2*image_size/2
+        # out3 = self.relu(self.conv1d_2(out2) + out1)
+        out3 = self.residual_module(x_in=out1, conv_1=self.conv1d_1, conv_2=self.conv1d_2)
+        out3 = self.maxpool1d(out3)
+
+        # out4 = self.relu(self.conv1d_3(out3))
+        # out5 = self.relu(self.conv1d_4(out4) + out3)
+        out5 = self.residual_module(x_in=out3, conv_1=self.conv1d_3, conv_2=self.conv1d_4)
+        out5 = self.maxpool1d(out5)
+
+        # out6 = self.relu(self.conv1d_5(out5))
+        # out7 = self.relu(self.conv1d_6(out6) + out5)
+        out7 = self.residual_module(x_in=out5, conv_1=self.conv1d_5, conv_2=self.conv1d_6)
+        out7 = self.maxpool1d(out7)
+        out7 = self.dropout1d1(out7)
+
+        # out8 = self.relu(self.conv1d_7(out7))
+        # out9 = self.relu(self.conv1d_8(out8) + out7)
+        out9 = self.residual_module(x_in=out7, conv_1=self.conv1d_7, conv_2=self.conv1d_8)
+        out9 = self.maxpool1d(out9)
+
+        # out10 = self.relu(self.conv1d_9(out9))
+        # out11 = self.relu(self.conv1d_10(out10) + out9)
+        out11 = self.residual_module(x_in=out9, conv_1=self.conv1d_9, conv_2=self.conv1d_10)
+        out11 = self.maxpool1d(out11)
+
+        out = self.relu(self.fc1(out11).squeeze())
+        out = self.dropoutfc(out)
+        out = self.relu(self.fc2(out))
+        out = self.softmax(self.fc3(out))
+        # count parameters
+        # self.num_trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        # print('log: num of trainable params: ', self.num_trainable_params)
+        return out, torch.argmax(out, dim=1)
+###############################################################################3
+
+
+class LayNet(nn.Module):
+
+    def __init__(self):
+        super(LayNet, self).__init__()
+
+        pass
+
+    def forward(self, x):
+        # x will be a tuple of as many receptive fields of 8*8 as we want
+
+
+        pass
+
+
+
+def train_net(model, dataset, pre_model, model_dir, im_size, patch_size, lr, batch_size, log_after, cuda):
     model.train()
     print(model)
     if cuda:
@@ -274,9 +660,7 @@ def train_net(model, dataset, pre_model, im_size, patch_size, lr, batch_size, lo
     # define loss and optimizer
     optimizer = Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
-    # print(dataloader)
-    dataloader = get_data(datasetpkl=dataset, im_size=im_size, patch_size=patch_size, batch_size=batch_size)
-    model_dir = 'bigger_models'
+    train_loader, val_dataloader, test_loader = get_dataloaders(base_path=dataset, batch_size=batch_size)
     try:
         os.mkdir(model_dir)
     except:
@@ -301,28 +685,18 @@ def train_net(model, dataset, pre_model, im_size, patch_size, lr, batch_size, lo
                 print('log: saved {}'.format(save_path))
             net_loss = []
             net_accuracy = []
-            for idx, data in enumerate(dataloader):
-                image, label = data['data']/255, data['label'].view(-1).long()
-                # print(image.size())
-                # np.save('testimage.npy', image[3].numpy().reshape(patch_size, patch_size))
-                # np.save('testlabel.npy', label[3].numpy().reshape(patch_size, patch_size))
-                # print(image.size())
-                test_x = torch.FloatTensor(image)
+            for idx, data in enumerate(train_loader):
+                test_x, label = data['input'], data['label']
                 if cuda:
                     test_x = test_x.cuda()
                 # forward
                 out_x, pred = model.forward(test_x)
                 size = out_x.shape
-                # print(out_x.shape, label.shape)
-                # print(label.numpy().min(), label.numpy().max(), np.unique(label.numpy()))
-                out_x = out_x.view(-1, model.out_classes).cpu()
                 loss = criterion(out_x.cpu(), label)
                 # get accuracy metric
-                pred = pred.view(-1).cpu()
-                # print(pred.size(), label.size())
-                accuracy = (pred == label).sum()
+                accuracy = (pred.cpu() == label).sum()
                 if idx % log_after == 0 and idx > 0:
-                    print('image size = {}, out_x size = {}, loss = {}: accuracy = {}/{}'.format(image.size(),
+                    print('image size = {}, out_x size = {}, loss = {}: accuracy = {}/{}'.format(test_x.size(),
                                                                                                  size,
                                                                                                  loss.item(),
                                                                                                  accuracy,
@@ -341,6 +715,34 @@ def train_net(model, dataset, pre_model, im_size, patch_size, lr, batch_size, lo
             print('####################################')
             print('epoch {} -> total loss = {:.5f}, total accuracy = {:.5f}%'.format(i, mean_loss, mean_accuracy))
             print('####################################')
+
+            # validate model
+            if i % 10 == 0:
+                eval_net(model=model, criterion=criterion, val_loader=val_dataloader, cuda=cuda)
+    pass
+
+
+def eval_net(model, criterion, val_loader, cuda):
+    model.eval()
+    net_accuracy, net_loss = [], []
+    for idx, data in enumerate(val_loader):
+        test_x, label = data['input'], data['label']
+        if cuda:
+            test_x = test_x.cuda()
+        # forward
+        out_x, pred = model.forward(test_x)
+        loss = criterion(out_x.cpu(), label)
+        # get accuracy metric
+        accuracy = (pred.cpu() == label).sum()
+        accuracy = accuracy * 100 / pred.size(0)
+        net_accuracy.append(accuracy)
+        net_loss.append(loss.item())
+        #################################
+    mean_accuracy = np.asarray(net_accuracy).mean()
+    mean_loss = np.asarray(net_loss).mean()
+    print('$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$')
+    print('log: validation:: total loss = {:.5f}, total accuracy = {:.5f}%'.format(mean_loss, mean_accuracy))
+    print('$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$')
     pass
 
 
@@ -385,6 +787,14 @@ def inference(model, dataset, pre_model, im_size, patch_size, lr, batch_size, lo
     pass
 
 
+
+def test():
+    d1_net = d1_resnet(spatial_size=128)
+    testing = torch.randn((2,3,128,128))
+    out, pred = d1_net(testing)
+    print(out.size(), pred.size())
+#
+test()
 
 
 
