@@ -9,6 +9,7 @@ from __future__ import division
 import os
 import cv2
 import numpy as np
+import scipy.misc
 import pickle as pkl
 from tqdm import trange
 import matplotlib.pyplot as pl
@@ -16,9 +17,9 @@ from PIL import Image, ImageDraw, ImageFont
 import xml.etree.ElementTree as et
 
 
-base = '/home/annus/Desktop/logical_layout_analysis/newbiggerdataset/'
-source = os.path.join(base, 'data')
-dest = os.path.join(base, 'new_grayscale')
+base = '/home/annus/Desktop/logical_layout_analysis/prima/'
+source = os.path.join(base, 'fullPrimadataset')
+dest = os.path.join(base, 'resized_images_and_all_labels')
 examples, labels_path, check = os.path.join(dest, 'examples'), os.path.join(dest, 'labels'), \
                                os.path.join(dest, 'check')
 xmls = [x for x in os.listdir(source) if x.endswith('.xml')]
@@ -47,8 +48,9 @@ def label_to_idx(iter):
 # all_labels = ['TableRegion', 'ImageRegion', 'ChartRegion', 'TextRegion', 'MathsRegion']
 # all_labels = label_to_idx(all_labels)
 # print(all_labels)
-all_labels = {'TableRegion':1, 'ImageRegion':2, 'GraphicRegion':2, 'ChartRegion':3, 'TextRegion':4, 'MathsRegion':5}
-print(all_labels)
+# all_labels = {'TableRegion':1, 'ImageRegion':2, 'GraphicRegion':2, 'ChartRegion':3, 'TextRegion':4, 'MathsRegion':5}
+# print(all_labels)
+all_labels = {}
 # we need these to save our dataset
 data_images = []
 data_labels = []
@@ -61,10 +63,13 @@ def generate_label_map(polygons, dim):
     draw = ImageDraw.Draw(img)
     for label_name, polygon in polygons:
         # if we already have the id, let it be, if not, insert a new one!!!
-        if label_name in all_labels.keys():
-            id = all_labels[label_name]
-
-            draw.polygon(polygon, fill=id)
+        if label_name not in all_labels.keys():
+            all_labels[label_name] = len(all_labels)+1 # we are leaving zero for background or something like that...
+        id = all_labels[label_name]
+        if len(polygon) < 2:
+            print('missing this one!')
+            continue
+        draw.polygon(polygon, fill=id)
             # print(points[0])
             # draw.text((x, y),"Sample Text",(r,g,b))
             # if you want to write text
@@ -82,11 +87,18 @@ def generate_label_map(polygons, dim):
             # # draw.text((x, y),"Sample Text",(r,g,b))
             # draw.text(polygon[0], label_name, 255, font=font)
 
-    # img.show()
-    # pl.imshow(np.asarray(img))
-    # pl.show()
     mask = np.array(img)
+    # pl.imshow(mask)
+    # pl.show()
     return mask
+
+
+def pad_image(img, new_dim, channels):
+    h, w, c = img.shape
+    new = np.zeros(shape=(new_dim, new_dim, channels))
+    w1 = new_dim // 2 - w // 2
+    new[w1:new_dim-w1,w1:new_dim-w1,:] = img
+    return new
 
 
 def process_one(name):
@@ -95,16 +107,18 @@ def process_one(name):
     :param name: name of the file
     :return: void, but saves the labelled image in dest folder
     """
-    img = Image.open(os.path.join(source, name+'.jpg')).convert('LA') # .convert('RGB')
+    img = Image.open(os.path.join(source, name+'.jpg')).convert('RGB') # .convert('LA') #
     # we need this for resizing
     w, h = img.size
-    new_dim = 512
+    new_dim = 900
     img = img.resize((new_dim, new_dim), Image.ANTIALIAS)
-    img_copy = np.asarray(img.copy())[:,:,0] # .convert('1', dither=Image.NONE) to convert to binary image
+    img_copy = np.asarray(img.copy()) # [:,:,0] # .convert('1', dither=Image.NONE) to convert to binary image
     # save our example
     draw = ImageDraw.Draw(img)
     root = et.parse(os.path.join(source, 'pc-'+name+'.xml')).getroot()
+    # print(root)
     page = root[-1]
+    # print(name)
     # labels = []
     all_polygons_in_region = []
     label_tags = []
@@ -112,8 +126,11 @@ def process_one(name):
         points = []
         for coords in region:
             region_label = region.tag.split('}')[-1]
-            # if region_label == 'GraphicRegion':
-            #     print(name)
+            if region_label == 'TextRegion':
+                # go deeper if it's text
+                if 'type' in region.attrib:
+                    region_label = region.attrib['type']
+                # print(region_label)
             label_tags.append(region_label)
             # labels.append(region_label)
             for point in coords:
@@ -131,9 +148,13 @@ def process_one(name):
         print('missing this one: {}'.format(name + '.jpg'))
         return
 
-    # img_copy.save(os.path.join(examples, '{}.png'.format(name))) # save #1. image as npy array
-    cv2.imwrite(os.path.join(examples, '{}.jpg'.format(name)), img_copy) # save #1. image as npy array
-    cv2.imwrite(os.path.join(labels_path, '{}.jpg'.format(name)), mask) # save #2. label
+    # we have our image and labels, let's pad them before saving them
+    mask = np.expand_dims(mask, axis=2)
+    mask = pad_image(mask, 1200, 1)[:,:,0]
+    img_copy = pad_image(img_copy, 1200, 3)
+
+    cv2.imwrite(os.path.join(examples, '{}.png'.format(name)), img_copy) # save #1. image as npy array
+    cv2.imwrite(os.path.join(labels_path, '{}.png'.format(name)), mask) # save #2. label
     # np.save(os.path.join(labels_path, name), mask) # save #2. label
     # save them as np arrays instead
     # data_images.append(np.asarray(img_copy))
@@ -170,12 +191,12 @@ if __name__ == '__main__':
     for i in trange(len(file_list)):
         name, extention = os.path.splitext(file_list[i])
         process_one(name=name)
-    # and finally pickle it up!
-    print('log: pickling now...')
-    dataman = {'examples': np.asarray(data_images), 'labels': np.asarray(data_labels)}
-    with open(os.path.join(base, '1_100_PRImA_dataset.pkl'), 'wb') as dataset:
-        pkl.dump(dataman, dataset, protocol=pkl.HIGHEST_PROTOCOL)
-        print(dataman['examples'].shape, dataman['labels'].shape)
+    # # and finally pickle it up!
+    # print('log: pickling now...')
+    # dataman = {'examples': np.asarray(data_images), 'labels': np.asarray(data_labels)}
+    # with open(os.path.join(base, '1_100_PRImA_dataset.pkl'), 'wb') as dataset:
+    #     pkl.dump(dataman, dataset, protocol=pkl.HIGHEST_PROTOCOL)
+    #     print(dataman['examples'].shape, dataman['labels'].shape)
     with open(os.path.join(base, 'labels_list.pkl'), 'wb') as this:
         pkl.dump(all_labels, this, pkl.HIGHEST_PROTOCOL)
 
